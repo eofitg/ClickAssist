@@ -1,0 +1,5 @@
+hotkey: "alt"   # any key
+enabled: true
+delay_ms: 150
+check: "left"   # left / right
+target: "right" # left / right
