@@ -1,4 +1,4 @@
-hotkey: "alt"   # any key
+hotkey: 164   # any key
 enabled: true
 delay_ms: 150
 check: "left"   # left / right

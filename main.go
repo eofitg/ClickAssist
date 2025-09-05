@@ -6,8 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -17,7 +15,7 @@ import (
 )
 
 type Config struct {
-	Hotkey  string `yaml:"hotkey"`
+	Hotkey  int    `yaml:"hotkey"` // Changed to int for key code
 	Enabled bool   `yaml:"enabled"`
 	DelayMS int    `yaml:"delay_ms"`
 	Check   string `yaml:"check"`  // left / right
@@ -26,66 +24,6 @@ type Config struct {
 
 var cfg Config
 var running = false
-
-// Cross-platform key code mapping
-var keyMap = map[string]uint16{
-	// Modifier keys
-	"alt":     56, // Windows
-	"option":  58, // macOS
-	"ctrl":    29,
-	"control": 29,
-	"shift":   42,
-	"cmd":     3675, // macOS Command
-	"command": 3675,
-	"win":     3676, // Windows Key
-	"super":   3676,
-
-	// Alphabet keys
-	"a": 30, "b": 48, "c": 46, "d": 32, "e": 18, "f": 33, "g": 34, "h": 35,
-	"i": 23, "j": 36, "k": 37, "l": 38, "m": 50, "n": 49, "o": 24, "p": 25,
-	"q": 16, "r": 19, "s": 31, "t": 20, "u": 22, "v": 47, "w": 17, "x": 45,
-	"y": 21, "z": 44,
-
-	// Number keys
-	"0": 11, "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10,
-
-	// Function keys
-	"f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64, "f7": 65, "f8": 66,
-	"f9": 67, "f10": 68, "f11": 87, "f12": 88,
-
-	// Other keys
-	"space":     57,
-	"enter":     28,
-	"return":    28,
-	"esc":       1,
-	"escape":    1,
-	"tab":       15,
-	"caps":      58,
-	"backspace": 14,
-	"delete":    83,
-	"insert":    82,
-	"home":      71,
-	"end":       79,
-	"pageup":    73,
-	"pagedown":  81,
-}
-
-func init() {
-	// Adjust key codes based on operating system
-	if runtime.GOOS == "darwin" { // macOS
-		keyMap["alt"] = 58
-		keyMap["ctrl"] = 59
-		keyMap["control"] = 59
-		keyMap["cmd"] = 55
-		keyMap["command"] = 55
-	} else if runtime.GOOS == "linux" {
-		// Linux key code adjustments
-		keyMap["alt"] = 64
-		keyMap["ctrl"] = 37
-		keyMap["control"] = 37
-		keyMap["super"] = 133
-	}
-}
 
 // Load configuration from config.yml or create default if not exist
 func loadConfig() {
@@ -96,7 +34,7 @@ func loadConfig() {
 	// If config.yml does not exist, create a default one
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultCfg := Config{
-			Hotkey:  "alt",
+			Hotkey:  164, // Default to ALT key code for Windows
 			Enabled: true,
 			DelayMS: 150,
 			Check:   "left",
@@ -107,6 +45,7 @@ func loadConfig() {
 			log.Fatalf("Failed to create default config.yml: %v", err)
 		}
 		fmt.Println("No config.yml found. Created default config.yml")
+		fmt.Println("To find your key code, run: go run main.go -debug-keys")
 		cfg = defaultCfg
 		return
 	}
@@ -119,16 +58,25 @@ func loadConfig() {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		log.Fatalf("Failed to parse config.yml: %v", err)
 	}
-	fmt.Printf("Config loaded: %+v\n", cfg)
+	fmt.Printf("Config loaded: Hotkey=%d, Enabled=%t, DelayMS=%d, Check=%s, Target=%s\n",
+		cfg.Hotkey, cfg.Enabled, cfg.DelayMS, cfg.Check, cfg.Target)
 }
 
-// Get key code from configuration string
-func getKeyCode(keyName string) (uint16, error) {
-	keyName = strings.ToLower(keyName)
-	if code, exists := keyMap[keyName]; exists {
-		return code, nil
+// Debug function to show key codes
+func debugKeys() {
+	fmt.Println("Press any key to see its key code. Press ESC to exit.")
+
+	evChan := hook.Start()
+	defer hook.End()
+
+	for ev := range evChan {
+		if ev.Kind == hook.KeyDown {
+			fmt.Printf("Key pressed: Code=%d, Char='%c'\n", ev.Rawcode, ev.Keychar)
+			if ev.Rawcode == 1 { // ESC key
+				break
+			}
+		}
 	}
-	return 0, fmt.Errorf("unknown key: %s", keyName)
 }
 
 // Simulate mouse click
@@ -141,20 +89,21 @@ func clickMouse(target string) {
 }
 
 func main() {
-	loadConfig()
-
-	// Get hotkey code from configuration
-	hotkeyCode, err := getKeyCode(cfg.Hotkey)
-	if err != nil {
-		log.Fatalf("Invalid hotkey '%s': %v", cfg.Hotkey, err)
+	// Check for debug flag
+	if len(os.Args) > 1 && os.Args[1] == "-debug-keys" {
+		debugKeys()
+		return
 	}
+
+	loadConfig()
 
 	// Capture interrupt signal for safe exit
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 
-	fmt.Printf("Press %s to toggle feature ON/OFF\n", strings.ToUpper(cfg.Hotkey))
+	fmt.Printf("Press key with code %d to toggle feature ON/OFF\n", cfg.Hotkey)
 	fmt.Printf("Configuration: Check %s mouse button, Target %s mouse button\n", cfg.Check, cfg.Target)
+	fmt.Println("To find key codes, run: go run main.go -debug-keys")
 
 	// Use gohook to listen for events
 	evChan := hook.Start()
@@ -163,7 +112,7 @@ func main() {
 	go func() {
 		for ev := range evChan {
 			// Listen for hotkey press to toggle state
-			if ev.Kind == hook.KeyDown && ev.Rawcode == hotkeyCode {
+			if ev.Kind == hook.KeyDown && ev.Rawcode == uint16(cfg.Hotkey) {
 				running = !running
 				fmt.Println("Feature", map[bool]string{true: "ON", false: "OFF"}[running])
 			}
