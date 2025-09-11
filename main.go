@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,26 +17,27 @@ import (
 )
 
 type Config struct {
-	Hotkey  int    `yaml:"hotkey"` // Changed to int for key code
+	Hotkey  int    `yaml:"hotkey"`
 	Enabled bool   `yaml:"enabled"`
 	DelayMS int    `yaml:"delay_ms"`
-	Check   string `yaml:"check"`  // left / right
-	Target  string `yaml:"target"` // left / right
+	Check   string `yaml:"check"`
+	Target  string `yaml:"target"`
 }
 
 var cfg Config
-var running = false
+var running int32
+var mu sync.Mutex
 
-// Load configuration from config.yml or create default if not exist
+var clickSemaphore = make(chan struct{}, 10)
+
 func loadConfig() {
 	exe, _ := os.Executable()
 	dir := filepath.Dir(exe)
 	configPath := filepath.Join(dir, "config.yml")
 
-	// If config.yml does not exist, create a default one
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultCfg := Config{
-			Hotkey:  164, // Default to ALT key code for Windows
+			Hotkey:  164,
 			Enabled: true,
 			DelayMS: 150,
 			Check:   "left",
@@ -50,7 +53,6 @@ func loadConfig() {
 		return
 	}
 
-	// Otherwise load from existing file
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		log.Fatalf("Failed to read config.yml: %v", err)
@@ -62,7 +64,6 @@ func loadConfig() {
 		cfg.Hotkey, cfg.Enabled, cfg.DelayMS, cfg.Check, cfg.Target)
 }
 
-// Debug function to show key codes
 func debugKeys() {
 	fmt.Println("Press any key to see its key code. Press ESC to exit.")
 
@@ -79,8 +80,10 @@ func debugKeys() {
 	}
 }
 
-// Simulate mouse click
 func clickMouse(target string) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	if target == "left" {
 		robotgo.Click("left", false)
 	} else if target == "right" {
@@ -88,8 +91,18 @@ func clickMouse(target string) {
 	}
 }
 
+func handleClickEvent() {
+	clickSemaphore <- struct{}{}
+	defer func() { <-clickSemaphore }()
+
+	time.Sleep(time.Duration(cfg.DelayMS) * time.Millisecond)
+
+	if atomic.LoadInt32(&running) == 1 && cfg.Enabled {
+		clickMouse(cfg.Target)
+	}
+}
+
 func main() {
-	// Check for debug flag
 	if len(os.Args) > 1 && os.Args[1] == "-debug-keys" {
 		debugKeys()
 		return
@@ -97,7 +110,6 @@ func main() {
 
 	loadConfig()
 
-	// Capture interrupt signal for safe exit
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 
@@ -105,30 +117,38 @@ func main() {
 	fmt.Printf("Configuration: Check %s mouse button, Target %s mouse button\n", cfg.Check, cfg.Target)
 	fmt.Println("To find key codes, run: go run main.go -debug-keys")
 
-	// Use gohook to listen for events
 	evChan := hook.Start()
 	defer hook.End()
 
+	eventQueue := make(chan hook.Event, 100)
+
 	go func() {
 		for ev := range evChan {
-			// Listen for hotkey press to toggle state
+			select {
+			case eventQueue <- ev:
+			default:
+				fmt.Println("Event queue full, dropping event")
+			}
+		}
+	}()
+
+	go func() {
+		for ev := range eventQueue {
 			if ev.Kind == hook.KeyDown && ev.Rawcode == uint16(cfg.Hotkey) {
-				running = !running
-				fmt.Println("Feature", map[bool]string{true: "ON", false: "OFF"}[running])
+				newState := atomic.LoadInt32(&running) == 0
+				if newState {
+					atomic.StoreInt32(&running, 1)
+				} else {
+					atomic.StoreInt32(&running, 0)
+				}
+				fmt.Println("Feature", map[bool]string{true: "ON", false: "OFF"}[newState])
+				continue
 			}
 
-			// Listen for mouse click events
-			if running && cfg.Enabled {
-				if cfg.Check == "left" && ev.Kind == hook.MouseDown && ev.Button == 1 {
-					go func() {
-						time.Sleep(time.Duration(cfg.DelayMS) * time.Millisecond)
-						clickMouse(cfg.Target)
-					}()
-				} else if cfg.Check == "right" && ev.Kind == hook.MouseDown && ev.Button == 2 {
-					go func() {
-						time.Sleep(time.Duration(cfg.DelayMS) * time.Millisecond)
-						clickMouse(cfg.Target)
-					}()
+			if atomic.LoadInt32(&running) == 1 && cfg.Enabled {
+				if (cfg.Check == "left" && ev.Kind == hook.MouseDown && ev.Button == 1) ||
+					(cfg.Check == "right" && ev.Kind == hook.MouseDown && ev.Button == 2) {
+					go handleClickEvent()
 				}
 			}
 		}
